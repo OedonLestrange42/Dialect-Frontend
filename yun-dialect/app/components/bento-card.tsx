@@ -11,7 +11,7 @@ const BentoCard = ({
   return (
     <div
       className={cn(
-        "group relative flex flex-col justify-between overflow-hidden rounded-2xl shadow-sm transition-all duration-300 ease-in-out hover:-translate-y-1 hover:shadow-lg",
+        "group relative flex flex-col justify-between overflow-hidden rounded-2xl border border-slate-200/10 shadow-sm transition-all duration-300 ease-in-out hover:-translate-y-1 hover:shadow-lg",
         className
       )}
     >

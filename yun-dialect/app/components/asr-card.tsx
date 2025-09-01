@@ -1,18 +1,49 @@
 'use client'
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, createContext, useContext } from 'react';
 import BentoCard from './bento-card';
 import { FaPlay, FaPause, FaVolumeUp, FaVolumeMute } from 'react-icons/fa';
+import tus from 'tus-js-client';
+import SparkMD5 from 'spark-md5';
+import { Upload } from 'tus-js-client';
+
+// 创建Context来共享JSON数据
+interface ASRContextType {
+  jsonResponse: any;
+  setJsonResponse: (data: any) => void;
+}
+
+const ASRContext = createContext<ASRContextType | null>(null);
+
+export const useASRContext = () => {
+  const context = useContext(ASRContext);
+  if (!context) {
+    throw new Error('useASRContext must be used within ASRProvider');
+  }
+  return context;
+};
+
+export const ASRProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [jsonResponse, setJsonResponse] = useState<any>(null);
+  
+  return (
+    <ASRContext.Provider value={{ jsonResponse, setJsonResponse }}>
+      {children}
+    </ASRContext.Provider>
+  );
+};
 
 const ASRCard = () => {
   const [file, setFile] = useState<File | null>(null);
   const [transcription, setTranscription] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { setJsonResponse } = useASRContext();
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
-
+  const [chunks, setChunks] = useState<{ index: number; start: number; end: number; status: string; retry: number }[]>([]);
+  const [chunkStatus, setChunkStatus] = useState<string[]>([]);
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -250,27 +281,97 @@ const ASRCard = () => {
     setLoading(true);
     setTranscription(null);
     setError(null);
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      const response = await fetch('/api/openai', {
-        method: 'POST',
-        body: formData,
+    // 分块参数
+    const chunkSize = 5 * 1024 * 1024; // 5MB
+    const totalChunks = Math.ceil(file.size / chunkSize);
+    let chunkArr: { index: number; start: number; end: number; status: string; retry: number }[] = [];
+let statusArr: string[] = [];
+    for (let i = 0; i < totalChunks; i++) {
+      chunkArr.push({
+        index: i,
+        start: i * chunkSize,
+        end: Math.min((i + 1) * chunkSize, file.size),
+        status: 'pending',
+        retry: 0
       });
-
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Something went wrong');
+      statusArr.push('pending');
+    }
+    setChunks(chunkArr);
+    setChunkStatus(statusArr as never[]);
+    // 计算文件MD5
+    const blobSlice = File.prototype.slice;
+    const spark = new SparkMD5.ArrayBuffer();
+    let currentChunk = 0;
+    function loadNext() {
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        if (e.target && e.target.result && typeof e.target.result !== "string") {
+          spark.append(e.target.result as ArrayBuffer);
+        }
+        currentChunk++;
+        if (currentChunk < totalChunks) {
+          loadNext();
+        } else {
+          const fileMd5 = spark.end();
+          uploadChunks(fileMd5);
+        }
+      };
+      const chunk = blobSlice.call(file!, currentChunk * chunkSize, Math.min((currentChunk + 1) * chunkSize, file!.size));
+      reader.readAsArrayBuffer(chunk);
+    }
+    loadNext();
+    async function uploadChunks(fileMd5: string) {
+      let newStatusArr = [...statusArr];
+      for (let i = 0; i < chunkArr.length; i++) {
+        const chunk = chunkArr[i];
+        try {
+          // 使用tus-js-client上传分块
+          await new Promise((resolve, reject) => {
+            const upload = new Upload(file?.slice(chunk.start, chunk.end) ?? new Blob(), {
+              endpoint: '/api/openai',
+              headers: {
+                'upload-chunk-index': chunk.index.toString(),
+                'upload-file-md5': fileMd5,
+                'upload-total-chunks': totalChunks.toString(),
+                'upload-filename': file?.name ?? 'untitled'
+              },
+              chunkSize,
+              onError: function (error) {
+                newStatusArr[chunk.index] = 'error';
+                setChunkStatus([...newStatusArr]);
+                reject(error);
+              },
+              onSuccess: function () {
+                newStatusArr[chunk.index] = 'success';
+                setChunkStatus([...newStatusArr]);
+                resolve(void 0);
+              }
+            });
+            upload.start();
+          });
+        } catch (err) {
+          // 错误处理
+          newStatusArr[chunk.index] = 'error';
+          setChunkStatus([...newStatusArr]);
+        }
       }
-
-      const result = await response.json();
-      setTranscription(result.text);
-    } catch (error: any) {
-      setError(error.message);
-    } finally {
       setLoading(false);
+      // 所有分块上传成功后可触发合并和识别
+      if (newStatusArr.every(s => s === 'success')) {
+        // 合并分块并识别
+        try {
+          const response = await fetch('/api/openai', {
+            method: 'POST',
+            body: JSON.stringify({ fileMd5, action: 'merge' }),
+            headers: { 'Content-Type': 'application/json' }
+          });
+          const result = await response.json();
+          setTranscription(result.text);
+          setJsonResponse(result);
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+      }
     }
   };
 
@@ -340,6 +441,21 @@ const ASRCard = () => {
             <p>{error}</p>
           </div>
         )}
+      </div>
+      <div className="flex flex-wrap gap-1 mt-2">
+        {chunks.map((chunk, idx) => (
+          <div
+            key={chunk.index}
+            style={{ width: 16, height: 16, borderRadius: 2, background: chunkStatus[idx] === 'pending' ? '#ccc' : chunkStatus[idx] === 'success' ? '#4caf50' : '#f44336', cursor: chunkStatus[idx] === 'error' ? 'pointer' : 'default' }}
+            title={`Chunk ${chunk.index}`}
+            onClick={() => {
+              if (chunkStatus[idx] === 'error') {
+                // 失败重传
+                handleUpload();
+              }
+            }}
+          />
+        ))}
       </div>
     </BentoCard>
   );
