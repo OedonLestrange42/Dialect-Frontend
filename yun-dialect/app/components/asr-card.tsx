@@ -72,7 +72,8 @@ const ASRCard = () => {
       audioContextRef.current = audioContext;
       analyserRef.current = analyser;
       sourceRef.current = source;
-      dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+      // For time domain data, Uint8Array length should be analyser.fftSize. Cast to satisfy libs expecting ArrayBuffer.
+      dataArrayRef.current = (new Uint8Array(new ArrayBuffer(analyser.fftSize)) as unknown as Uint8Array<ArrayBuffer>);
     };
 
     const draw = () => {
@@ -94,7 +95,8 @@ const ASRCard = () => {
       const drawVisualizer = () => {
         animationFrameIdRef.current = requestAnimationFrame(drawVisualizer);
 
-        analyser.getByteTimeDomainData(dataArray);
+        // Some DOM typings (or third-party) require Uint8Array<ArrayBuffer>
+        analyser.getByteTimeDomainData((dataArray as unknown as Uint8Array<ArrayBuffer>));
 
         canvasCtx.fillStyle = 'rgb(243, 240, 209)';
         canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
