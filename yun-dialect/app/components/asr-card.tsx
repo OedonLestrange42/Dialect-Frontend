@@ -2,9 +2,9 @@
 import React, { useState, useRef, useEffect, createContext, useContext } from 'react';
 import BentoCard from './bento-card';
 import { FaPlay, FaPause, FaVolumeUp, FaVolumeMute } from 'react-icons/fa';
-import tus from 'tus-js-client';
+// removed: import tus from 'tus-js-client';
 import SparkMD5 from 'spark-md5';
-import { Upload } from 'tus-js-client';
+// removed: import { Upload } from 'tus-js-client';
 
 // 创建Context来共享JSON数据
 interface ASRContextType {
@@ -37,6 +37,7 @@ const ASRCard = () => {
   const [transcription, setTranscription] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isMerging, setIsMerging] = useState(false); // 新增：合并与识别中
   const { setJsonResponse } = useASRContext();
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -297,7 +298,8 @@ let statusArr: string[] = [];
       statusArr.push('pending');
     }
     setChunks(chunkArr);
-    setChunkStatus(statusArr as never[]);
+-    setChunkStatus(statusArr as never[]);
++    setChunkStatus(statusArr);
     // 计算文件MD5
     const blobSlice = File.prototype.slice;
     const spark = new SparkMD5.ArrayBuffer();
@@ -325,30 +327,30 @@ let statusArr: string[] = [];
       for (let i = 0; i < chunkArr.length; i++) {
         const chunk = chunkArr[i];
         try {
-          // 使用tus-js-client上传分块
-          await new Promise((resolve, reject) => {
-            const upload = new Upload(file?.slice(chunk.start, chunk.end) ?? new Blob(), {
-              endpoint: '/api/openai',
+          // 改为原生 fetch 逐块上传，避免 tus 协议握手带来的 400
+          try {
+            const res = await fetch('/api/openai', {
+              method: 'POST',
               headers: {
+                'content-type': 'application/offset+octet-stream',
                 'upload-chunk-index': chunk.index.toString(),
                 'upload-file-md5': fileMd5,
                 'upload-total-chunks': totalChunks.toString(),
                 'upload-filename': file?.name ?? 'untitled'
               },
-              chunkSize,
-              onError: function (error) {
-                newStatusArr[chunk.index] = 'error';
-                setChunkStatus([...newStatusArr]);
-                reject(error);
-              },
-              onSuccess: function () {
-                newStatusArr[chunk.index] = 'success';
-                setChunkStatus([...newStatusArr]);
-                resolve(void 0);
-              }
+              body: file?.slice(chunk.start, chunk.end) ?? new Blob()
             });
-            upload.start();
-          });
+            if (!res.ok) {
+              const errText = await res.text().catch(() => '');
+              throw new Error(`chunk ${chunk.index} upload failed: ${res.status} ${errText}`);
+            }
+            newStatusArr[chunk.index] = 'success';
+            setChunkStatus([...newStatusArr]);
+          } catch (error) {
+            newStatusArr[chunk.index] = 'error';
+            setChunkStatus([...newStatusArr]);
+            throw error;
+          }
         } catch (err) {
           // 错误处理
           newStatusArr[chunk.index] = 'error';
@@ -360,16 +362,22 @@ let statusArr: string[] = [];
       if (newStatusArr.every(s => s === 'success')) {
         // 合并分块并识别
         try {
+          setIsMerging(true); // 显示“正在识别”遮罩
           const response = await fetch('/api/openai', {
             method: 'POST',
-            body: JSON.stringify({ fileMd5, action: 'merge' }),
+            body: JSON.stringify({ fileMd5, action: 'merge', filename: file?.name ?? undefined }),
             headers: { 'Content-Type': 'application/json' }
           });
           const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result?.error || '合并或识别失败');
+          }
           setTranscription(result.text);
           setJsonResponse(result);
         } catch (error) {
           setError(error instanceof Error ? error.message : String(error));
+        } finally {
+          setIsMerging(false);
         }
       }
     }
@@ -398,64 +406,56 @@ let statusArr: string[] = [];
                 max="100"
                 value={progress || 0}
                 onChange={handleProgressChange}
-                className="w-full absolute top-1/2 -translate-y-1/2 appearance-none bg-transparent [&::-webkit-slider-runnable-track]:rounded-lg [&::-webkit-slider-runnable-track]:bg-black/25 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500"
               />
             </div>
-            <div className="flex items-center space-x-4 mt-2">
-              <button onClick={togglePlayPause} className="text-2xl">
+            <div className="flex items-center justify-between mt-4">
+              <button onClick={togglePlayPause} className="p-2 bg-blue-500 text-white rounded-full hover:bg-blue-600">
                 {isPlaying ? <FaPause /> : <FaPlay />}
               </button>
               <div className="flex items-center space-x-2">
-                <button onClick={toggleMute} className="text-xl">
-                  {isMuted ? <FaVolumeMute /> : <FaVolumeUp />}
-                </button>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={isMuted ? 0 : volume}
-                  onChange={handleVolumeChange}
-                  className="w-24"
-                />
+                <FaVolumeMute className="text-gray-600" />
+                <input type="range" min="0" max="1" step="0.01" value={isMuted ? 0 : volume} onChange={handleVolumeChange} />
+                <FaVolumeUp className="text-gray-600" />
               </div>
+            </div>
+            <button onClick={handleUpload} className="mt-4 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50" disabled={loading || isMerging}>
+              {loading ? '正在上传分块...' : isMerging ? '正在识别...' : '上传并识别'}
+            </button>
+
+            {/* 分块上传状态显示 */}
+            {chunks.length > 0 && (
+              <div className="mt-4 grid grid-cols-6 gap-1">
+                {chunkStatus.map((s, i) => (
+                  <div key={i} className={`h-2 rounded ${s === 'success' ? 'bg-green-500' : s === 'error' ? 'bg-red-500' : 'bg-gray-300'}`} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 识别中的遮罩层 */}
+        {(isMerging) && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg flex flex-col items-center">
+              <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4" />
+              <p className="text-gray-800 dark:text-gray-100">正在识别，请勿关闭页面...</p>
             </div>
           </div>
         )}
-        <button
-          onClick={handleUpload}
-          disabled={loading || !file}
-          className="px-6 py-2 rounded-full bg-gradient-to-r from-[#F3F0D1] to-[#275252] text-white font-semibold shadow-lg hover:scale-105 transition-transform duration-300 disabled:opacity-50"
-        >
-          {loading ? '正在识别中...' : '上传并识别'}
-        </button>
+
+        {/* 识别结果或错误显示 */}
         {transcription && (
-          <div className="mt-4 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg w-full">
-            <h3 className="font-semibold">识别结果:</h3>
-            <p>{transcription}</p>
+          <div className="mt-4 w-full p-4 bg-white dark:bg-gray-900 rounded-lg shadow">
+            <h3 className="font-semibold mb-2">识别结果</h3>
+            <p className="whitespace-pre-wrap break-words">{transcription}</p>
           </div>
         )}
         {error && (
-          <div className="mt-4 p-4 bg-red-100 text-red-700 rounded-lg w-full">
-            <h3 className="font-semibold">错误:</h3>
-            <p>{error}</p>
+          <div className="mt-4 w-full p-4 bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-200 rounded-lg">
+            <h3 className="font-semibold mb-2">出错了</h3>
+            <p className="whitespace-pre-wrap break-words">{error}</p>
           </div>
         )}
-      </div>
-      <div className="flex flex-wrap gap-1 mt-2">
-        {chunks.map((chunk, idx) => (
-          <div
-            key={chunk.index}
-            style={{ width: 16, height: 16, borderRadius: 2, background: chunkStatus[idx] === 'pending' ? '#ccc' : chunkStatus[idx] === 'success' ? '#4caf50' : '#f44336', cursor: chunkStatus[idx] === 'error' ? 'pointer' : 'default' }}
-            title={`Chunk ${chunk.index}`}
-            onClick={() => {
-              if (chunkStatus[idx] === 'error') {
-                // 失败重传
-                handleUpload();
-              }
-            }}
-          />
-        ))}
       </div>
     </BentoCard>
   );

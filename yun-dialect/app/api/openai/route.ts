@@ -20,9 +20,12 @@ export async function POST(req: NextRequest) {
           'upload-chunk-index': chunkIndex || '',
           'upload-file-md5': fileMd5 || '',
           'upload-total-chunks': totalChunks || '',
-          'upload-filename': filename || ''
+          'upload-filename': filename || '',
+          'content-type': contentType || 'application/offset+octet-stream'
         },
-        body: req.body
+        body: req.body,
+        // @ts-ignore Node.js(undici) 要求当 body 为流时需要设置 duplex: 'half'
+        duplex: 'half'
       });
       if (!backendResponse.ok) {
         const errorText = await backendResponse.text();
@@ -30,6 +33,35 @@ export async function POST(req: NextRequest) {
       }
       return NextResponse.json({ success: true });
     }
+
+    // 新增：JSON 合并识别分支
+    if (contentType.startsWith('application/json')) {
+      const payload = await req.json();
+      if (payload && payload.action === 'merge') {
+        const baseUrl = process.env.ASR_BASE_URL || 'http://localhost:8000';
+        const apiKey = process.env.ASR_API_KEY || 'your-secret-api-key';
+        const backendResp = await fetch(`${baseUrl}/v1/audio/merge`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            fileMd5: payload.fileMd5,
+            filename: payload.filename, // 可选
+            cleanup: true
+          })
+        });
+        const text = await backendResp.text();
+        try {
+          const json = JSON.parse(text);
+          return NextResponse.json(json, { status: backendResp.status });
+        } catch {
+          return NextResponse.json({ error: `Backend merge error: ${text}` }, { status: backendResp.status });
+        }
+      }
+    }
+
     // 兼容原始整体文件上传
     const formContentType = req.headers.get('content-type') || '';
     if (!contentType.startsWith('multipart/form-data') && !contentType.startsWith('application/x-www-form-urlencoded')) {
