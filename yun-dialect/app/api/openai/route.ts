@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true });
     }
 
-    // 新增：JSON 合并识别分支
+    // 新增：JSON 合并识别/URL识别 分支
     if (contentType.startsWith('application/json')) {
       const payload = await req.json();
       if (payload && payload.action === 'merge') {
@@ -58,6 +58,34 @@ export async function POST(req: NextRequest) {
           return NextResponse.json(json, { status: backendResp.status });
         } catch {
           return NextResponse.json({ error: `Backend merge error: ${text}` }, { status: backendResp.status });
+        }
+      }
+
+      // 新增：从远程 URL 识别（例如 MinIO 预签名链接）
+      if (payload && payload.action === 'from_url') {
+        const baseUrl = process.env.ASR_BASE_URL || 'http://localhost:8000';
+        const apiKey = process.env.ASR_API_KEY || 'your-secret-api-key';
+        const body = {
+          url: payload.url,
+          filename: payload.filename,
+          prompt: payload.prompt,
+          response_format: payload.response_format || 'verbose_json',
+          headers: payload.headers || undefined
+        };
+        const backendResp = await fetch(`${baseUrl}/v1/audio/from_url`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body)
+        });
+        const text = await backendResp.text();
+        try {
+          const json = JSON.parse(text);
+          return NextResponse.json(json, { status: backendResp.status });
+        } catch {
+          return NextResponse.json({ error: `Backend from_url error: ${text}` }, { status: backendResp.status });
         }
       }
     }

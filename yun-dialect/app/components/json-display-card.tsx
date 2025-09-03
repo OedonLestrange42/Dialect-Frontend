@@ -49,7 +49,7 @@ const JSONDisplayCard = () => {
   };
 
   return (
-    <BentoCard className="col-span-1 md:col-span-2 flex flex-col p-6 bg-gradient-to-br from-[#275252]/50 to-[#F3F0D1]/50 backdrop-blur-lg">
+    <BentoCard className="col-span-1 md:col-span-2 flex flex-col p-6 bg-gradient-to-br from-[#275252]/50 to-[#F3F0D1]/50 backdrop-blur-lg max-h-[70vh] overflow-auto">
       <h2 className="text-2xl font-semibold mb-4 text-center">JSON 响应数据</h2>
       <div className="flex-1 overflow-auto">
         {jsonResponse ? (
